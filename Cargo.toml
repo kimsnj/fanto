@@ -1,0 +1,8 @@
+[package]
+name = "fanto"
+version = "0.1.0"
+authors = ["amal"]
+
+[dependencies]
+nix = "0.8.0"
+error-chain = "0.10.0"
