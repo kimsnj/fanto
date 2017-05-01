@@ -20,14 +20,17 @@ mod errors {
 }
 use errors::*;
 
-// constants
+/** constants **/
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+const ESCAPE: char = '\x1b';
 
-// terminal
-struct TermConfig {
+/** terminal**/
+struct EditorConfig {
     orig: termios::Termios,
     rows: u16,
     cols: u16,
+    cx: u16,
+    cy: u16,
 }
 
 fn ctrl(c: char) -> u8 {
@@ -65,39 +68,69 @@ fn read_window_size() -> Result<(u16, u16)> {
     Err("Unable to read terminal size".into())
 }
 
-fn term_config() -> Result<TermConfig> {
+fn term_config() -> Result<EditorConfig> {
     let orig = termios::tcgetattr(STDIN_FILENO)?;
     let (rows, cols) = read_window_size()?;
-    Ok(TermConfig {
+    Ok(EditorConfig {
         orig: orig,
         rows: rows,
         cols: cols,
+        cx: 0,
+        cy: 0,
     })
 }
 
 /** input **/
-fn process_key(b: u8) -> bool {
-    let c = b as char;
-    if b == ctrl('q') {
-        return false;
-    } else if c.is_control() {
-        print!("{}\r\n", b);
-    } else {
-        print!("{} ({})\r\n", b, c);
+#[derive(Debug, Clone, Copy)]
+enum Input {
+    Control(u8),
+    Char(char),
+    ArrowUp,
+    ArrowDown,
+    ArrowRight,
+    ArrowLeft
+}
+
+fn process_key(i: Input, conf: &mut EditorConfig) -> bool {
+    use Input::*;
+    match i {
+        Control(b) if b == ctrl('q') => return false,
+        Control(b) => print!("{}\r\n", b),
+        Char(c) => print!("{} ({})\r\n", c as u8, c), 
+        ArrowUp => {
+            if conf.cy > 0 {
+                conf.cy -= 1
+            }
+        }
+        ArrowDown => {
+            if conf.cy < conf.rows - 1 {
+                conf.cy += 1
+            }
+        }
+        ArrowLeft => {
+            if conf.cx > 0 {
+                conf.cx -= 1
+            }
+        }
+        ArrowRight => {
+            if conf.cx < conf.cols - 1 {
+                conf.cx += 1
+            }
+        }
     }
     true
 }
 
 /** output **/
-fn draw_rows(rows: u16, cols: u16) {
+fn draw_rows(conf: &EditorConfig) {
     let mut buf = String::new();
     buf += "\x1b[?25l";             // Hide cursor
     buf += "\x1b[H";                // Move cursor to top-right
-    for y in 0..rows {
-        if y == rows / 3 {
+    for y in 0..conf.rows {
+        if y == conf.rows / 3 {
             let welcome = format!("Welcome to Fanto editor version {}", VERSION);
-            let len = std::cmp::min(cols as usize, welcome.len());
-            let padding = (cols as usize - len) / 2;
+            let len = std::cmp::min(conf.cols as usize, welcome.len());
+            let padding = (conf.cols as usize - len) / 2;
             if padding > 0 {
                 buf += "~";
                 buf += &std::iter::repeat(" ").take(padding - 1).collect::<String>();
@@ -107,11 +140,11 @@ fn draw_rows(rows: u16, cols: u16) {
             buf += "~";
         }
         buf += "\x1b[K";
-        if y < rows - 1 {
+        if y < conf.rows - 1 {
             buf += "\r\n";
-        } 
+        }
     }
-    buf += "\x1b[H";                // Move cursor to beginning
+    buf += &format!("\x1b[{};{}H", conf.cy + 1, conf.cx + 1);
     buf += "\x1b[?25h";             // Show cursor
     print!("{}", buf);
     let _ = std::io::stdout().flush();
@@ -122,20 +155,45 @@ fn refresh_screen() {
     let _ = std::io::stdout().flush();
 }
 
+fn read_key<I>(bytes: &mut I) -> Option<Input>
+    where I: Iterator<Item = std::io::Result<u8>>
+{
+    if let Some(Ok(b)) = bytes.next() {
+        return match b as char {
+            ESCAPE => {
+                if let (Some(Ok(b1)), Some(Ok(b2))) = (bytes.next(), bytes.next()) {
+                    match (b1 as char, b2 as char) {
+                        ('[', 'A') => Some(Input::ArrowUp),
+                        ('[', 'B') => Some(Input::ArrowDown),
+                        ('[', 'C') => Some(Input::ArrowRight),
+                        ('[', 'D') => Some(Input::ArrowLeft),
+                        (c, _) => Some(Input::Char(c))
+                    }
+                } else {
+                    Some(Input::Control(ESCAPE as u8))
+                }
+            }
+            c if c.is_control() => Some(Input::Control(b)),
+            c => Some(Input::Char(c)),
+        };
+    }
+    return None;
+}
+
 /** main function **/
 fn run() -> Result<()> {
-    let config = term_config().chain_err(|| "Unable to initialize terminal config")?;
-    draw_rows(config.rows, config.cols);
-    println!("rows: {}, cols: {}", config.rows, config.cols);
+    let mut config = term_config().chain_err(|| "Unable to initialize terminal config")?;
 
     let stdin = std::io::stdin();
     let mut bytes = stdin.lock().bytes();
     enable_raw_mode()?;
+    draw_rows(&config);
 
-    while let Some(Ok(b)) = bytes.next() {
-        if !process_key(b) {
+    while let Some(i) = read_key(&mut bytes) {
+        if !process_key(i, &mut config) {
             break;
         }
+        // draw_rows(&config);
     }
     println!();
 
